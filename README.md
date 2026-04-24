@@ -1,4 +1,5 @@
 # Command Center
+<img width="1647" height="907" alt="image" src="https://github.com/user-attachments/assets/f4f3ad89-bcd5-480f-8076-e033ec869855" />
 
 A personal productivity dashboard built with React + TypeScript + Vite + Tailwind. Dark-themed, zero dependencies beyond the core stack, all data persisted in localStorage.
 
