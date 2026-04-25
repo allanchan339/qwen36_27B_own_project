@@ -137,7 +137,8 @@ vllm serve Qwen/Qwen3.6-27B-FP8 \
 2. **`preserve_thinking` must be `false`** – The enhanced jinja template **will not work** with `preserve_thinking=true`. This is a new feature in Qwen 3.6 where `qwen3.5-enhanced.jinja` is not compatible.
 3. **The NVIDIA driver upgrade can break things** – going from 591.86 to 595.79 introduced NCCL deadlocks on my mixed‑GPU setup. The fix requires new NCCL env vars and `--disable-custom-all-reduce`. If you're on 595.79 without these overrides, you'll hit random deadlocks that masquerade as tool‑calling failures.
 4. **The original Qwen 3.5 fixes still stand** – `VLLM_TEST_FORCE_FP8_MARLIN=1` remains non‑optional on mixed‑GPU setups to avoid precision drift, and the same NCCL tuning (updated for the new driver) is mandatory.
-5. **Qwen 3.6‑27B is a worthy upgrade** – with this stack, it's just as reliable as 3.5‑27B for agentic work, while offering faster TTFT and slightly sharper reasoning.
+5. **Qwen 3.6‑27B is not just an incremental step** – it's a dense 27B model that beats the old MoE flagship Qwen 3.5‑397B‑A17B on core agentic‑coding benchmarks (SWE‑bench Verified 77.2 vs 76.2, Pro 53.5 vs 50.9, SkillsBench 48.2 vs 30.0), making it a generational upgrade rather than a refinement.
+
 6. **180K tokens is the new normal** – the system handled a 10‑minute uninterrupted agentic session with zero tool‑calling errors, demonstrating production‑grade stability on consumer hardware.
 
 ---
