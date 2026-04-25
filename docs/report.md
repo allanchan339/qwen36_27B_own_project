@@ -1,17 +1,19 @@
-**Title**: Qwen 3.6‑27B‑FP8: The Missing Driver Fix and a 180K‑Token Stress Test (Follow‑Up)
+**Title**: Tested tool calling fixes for Qwen 3.6‑27B‑FP8: 180K Token Agentic Run, Driver 595.79 Deadlocks, and Why Enhanced Jinja Breaks with `preserve_thinking=true`
 
-**TL;DR**: After [my deep‑dive on Qwen 3.5 tool‑calling](https://www.reddit.com/r/vLLM/comments/1skks8n/), I took the same `enhanced.jinja` setup and ran **Qwen 3.6‑27B‑FP8** through an unsupervised, agentic build. The catch? Upgrading to **NVIDIA Studio Driver 595.79** introduced NCCL deadlocks that required extra config overrides to fix. Once resolved, the model ran for **180 000 tokens** without a single malformed tool call, and the finished project is [here](https://github.com/allanchan339/qwen36_27B_own_project).
+**TL;DR**: After [my deep‑dive on Qwen 3.5 tool‑calling](https://www.reddit.com/r/Vllm/comments/1skks8n/qwen_35_27b35ba3b_tool_calling_issues_why_it/) and [trail on Qwen 3.6-35B-A3B](https://www.reddit.com/r/LocalLLM/comments/1sqpsut/qwen_3635ba3b_reddit_asked_so_i_tested_if_the_35/), I took the same `enhanced.jinja` setup and ran **Qwen 3.6‑27B‑FP8** through an unsupervised, agentic build. The catch? Upgrading to **NVIDIA Studio Driver 595.79** introduced NCCL deadlocks that required extra config overrides to fix. Once resolved, the model ran for **180 000 tokens** without a single malformed tool call, and the finished project is [here](https://github.com/allanchan339/qwen36_27B_own_project).
+
+**Important**: The `qwen3.5-enhanced.jinja` template **requires** `preserve_thinking=false` as it is new feature in Qwen 3.6. If you accidentally set it to `true`, the `qwen3.5-enhanced.jinja` will break and tool calls will fail. The template treats unclosed `<thinking>` blocks as plain content only when `preserve_thinking` is off (the default). All examples below assume that flag is correctly set.
 
 ---
 
 ## 1. What Came Before (Recap of the Qwen 3.5 Post)
 
-Last month I spent weeks debugging Qwen 3.5‑27B and 35B‑A3B on a mixed‑GPU rig (RTX 4090 + RTX 3090). The fixes that made agentic work possible:
+Last time I spent weeks debugging Qwen 3.5‑27B and 35B‑A3B on a mixed‑GPU rig (RTX 4090 + RTX 3090). The fixes that made agentic work possible:
 
-* **`qwen3.5‑enhanced.jinja`** – a custom interleaved‑thinking template that closes `</thinking>` *before* tool calls, hiding historical reasoning while keeping the current block visible.
-* **`qwen3_xml` parser** – the C‑based XML parser that handles `<`, `>`, `&` and nested JSON without corruption, unlike the regex‑based `qwen3_coder` that can break on complex arguments.
-* **`VLLM_TEST_FORCE_FP8_MARLIN=1`** – forces the 4090 (SM89) to use W8A16 instead of native W8A8, preventing precision drift between the two GPUs.
-* **NCCL tuning** (`P2P_DISABLE`, `IB_DISABLE`, `Ring`) – essential for stability on PCIe/SYS topologies.
+- **`qwen3.5‑enhanced.jinja`** – a custom interleaved‑thinking template that **treats any unclosed `<thinking>` block as plain content**, not as reasoning content. This way the harness sees the tool call directly, even when the model forgets to close the thinking tag – a pattern known as “CoT leakage.” **The template must have `preserve_thinking=false`** (the default) or it will not function.
+- **Streaming‑parser dependency** – the jinja fix relies on the parser processing tokens as they stream, detecting `<tool_calling>` even when the surrounding `<thinking>` tag is still open. On **Qwen 3.5‑27B**, the `qwen3_xml` parser works perfectly for this and is generally more robust. However, on Qwen 3.6, only the `qwen3_coder` parser triggers correctly with the unclosed thinking block; `qwen3_xml` fails to fire the tool call (more on this below).
+- **`VLLM_TEST_FORCE_FP8_MARLIN=1`** – forces the 4090 (SM89) to use W8A16 instead of native W8A8, preventing precision drift between the two GPUs.
+- **NCCL tuning** (`P2P_DISABLE`, `IB_DISABLE`, `Ring`) – essential for stability on PCIe topologies.
 
 With that stack, Qwen 3.5‑27B ran a **1h 9m continuous agentic session** at 138K tokens, building a complete FastAPI + React app without any tool‑calling failures.
 
@@ -19,10 +21,10 @@ With that stack, Qwen 3.5‑27B ran a **1h 9m continuous agentic session** a
 
 ## 2. Qwen 3.6‑27B – The Upgrade Path
 
-A few weeks later I swapped the model to `Qwen/Qwen3.6-27B‑FP8` while keeping the same `enhanced.jinja` template, the same parser, and the same NCCL flags. Everything worked fine on **driver 591.86** — so I upgraded to **Studio Driver 595.79**, expecting better performance. Instead, everything broke:
+A few weeks later I swapped the model to `Qwen/Qwen3.6-27B‑FP8` while keeping the same `enhanced.jinja` template (with `preserve_thinking=false`). **The parser had to change**: despite `qwen3_xml` being the more robust choice on 3.5, on 3.6 it did not trigger tool calls when `<thinking>` remained unclosed (the exact scenario the template relies on). So I switched to **`qwen3_coder`** – a parser that, while less sophisticated with special characters, processes streams aggressively to catch the tool call inside an unclosed thinking block. (After bug fix introduced in [this post](https://www.reddit.com/r/Vllm/comments/1suasv2/comment/oi02krw/?context=1). I may switch back to `qwen3_xml` for vLLM 0.20.1 for above.) Everything worked fine on **driver 591.86** — so I upgraded to **Studio Driver 595.79**, expecting better performance. Instead, everything broke:
 
-* Random **NCCL deadlocks** – the server would freeze hard mid‑generation, requiring a restart.
-* These deadlocks looked exactly like tool‑calling failures, but the logs pointed to NCCL timeouts, not parser errors.
+- Random **NCCL deadlocks** – the server would freeze hard mid‑generation, requiring a restart.
+- These deadlocks looked exactly like tool‑calling failures, but the logs pointed to NCCL timeouts, not parser errors.
 
 ---
 
@@ -105,7 +107,7 @@ source /home/cychan/vLLM/.venv/bin/activate
 vllm serve Qwen/Qwen3.6-27B-FP8 \
   --served-model-name Qwen3.5-27B \
   --chat-template qwen3.5-enhanced.jinja \
-  --default-chat-template-kwargs '{"preserve_thinking": false}' \
+  --default-chat-template-kwargs '{"preserve_thinking": false}' \   # MANDATORY: the enhanced jinja will break if this is true
   --attention-backend FLASHINFER \
   --trust-remote-code \
   --tensor-parallel-size 2 \
@@ -117,7 +119,7 @@ vllm serve Qwen/Qwen3.6-27B-FP8 \
   --max-num-batched-tokens 12288 \
   --max-num-seqs 4 \
   --kv-cache-dtype fp8 \
-  --tool-call-parser qwen3_xml \
+  --tool-call-parser qwen3_coder \          # REQUIRED for Qwen 3.6 with enhanced.jinja; for Qwen 3.5 27B, qwen3_xml also works (see https://www.reddit.com/r/Vllm/comments/1suasv2/)
   --reasoning-parser qwen3 \
   --no-use-tqdm-on-load \
   --host 0.0.0.0 \
@@ -125,21 +127,25 @@ vllm serve Qwen/Qwen3.6-27B-FP8 \
   --language-model-only \
   --disable-custom-all-reduce            # CRITICAL for driver 595.79
 
-#  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":5}' \
-#  Current hardware does not support 80B‑A3B as speculator
 ```
 
 ---
 
 ## 6. Key Takeaways
 
-1. **The original Qwen 3.5 fixes still stand** – `enhanced.jinja` is just as important for Qwen 3.6 on smaller models, and `VLLM_TEST_FORCE_FP8_MARLIN=1` remains non‑optional on mixed‑GPU setups.
-2. **The NVIDIA driver upgrade can break things** – going from 591.86 to 595.79 introduced NCCL deadlocks on my mixed‑GPU setup. The fix requires new NCCL env vars and `--disable-custom-all-reduce`. If you're on 595.79 without these overrides, you'll hit random deadlocks that masquerade as tool‑calling failures.
-3. **Qwen 3.6‑27B is a worthy upgrade** – with this stack, it's just as reliable as 3.5‑27B for agentic work, while offering faster TTFT and slightly sharper reasoning.
-4. **180K tokens is the new normal** – the system handled a 10‑minute uninterrupted agentic session with zero tool‑calling errors, demonstrating production‑grade stability on consumer hardware.
+1. **Parser choice depends on the model** – The enhanced jinja template relies on a streaming parser to catch tool calls inside unclosed `<thinking>` blocks. On **Qwen 3.5‑27B**, the `qwen3_xml` parser works fine and is generally more robust (see [this detailed post](https://www.reddit.com/r/Vllm/comments/1skks8n/qwen_35_27b35ba3b_tool_calling_issues_why_it/)). On **Qwen 3.6**, `qwen3_xml` fails to trigger the tool call in that exact scenario, so I use `qwen3_coder` instead.
+2. **`preserve_thinking` must be `false`** – The enhanced jinja template **will not work** with `preserve_thinking=true`. This is a new feature in Qwen 3.6 where `qwen3.5-enhanced.jinja` is not compatible.
+3. **The NVIDIA driver upgrade can break things** – going from 591.86 to 595.79 introduced NCCL deadlocks on my mixed‑GPU setup. The fix requires new NCCL env vars and `--disable-custom-all-reduce`. If you're on 595.79 without these overrides, you'll hit random deadlocks that masquerade as tool‑calling failures.
+4. **The original Qwen 3.5 fixes still stand** – `VLLM_TEST_FORCE_FP8_MARLIN=1` remains non‑optional on mixed‑GPU setups to avoid precision drift, and the same NCCL tuning (updated for the new driver) is mandatory.
+5. **Qwen 3.6‑27B is a worthy upgrade** – with this stack, it's just as reliable as 3.5‑27B for agentic work, while offering faster TTFT and slightly sharper reasoning.
+6. **180K tokens is the new normal** – the system handled a 10‑minute uninterrupted agentic session with zero tool‑calling errors, demonstrating production‑grade stability on consumer hardware.
 
 ---
 
-**Bottom line**: The `enhanced.jinja` template and mixed‑GPU NCCL tuning that made Qwen 3.5 viable carry forward to Qwen 3.6. The new driver (595.79) actually broke things, but with the right overrides it works perfectly. Full recipe above – go build.
+**Bottom line**: The `enhanced.jinja` template works on both Qwen 3.5 and 3.6, **provided `preserve_thinking=false`** and you choose the right parser for the model. Combined with the new driver workarounds, the stack yields a rock‑solid 180K‑token agentic run. Full recipe in [Original Qwen 3.5 deep‑dive](https://www.reddit.com/r/Vllm/comments/1skks8n/qwen_35_27b35ba3b_tool_calling_issues_why_it/) – go build.
 
-*Links*: [Original Qwen 3.5 deep‑dive](https://www.reddit.com/r/vLLM/comments/1skks8n/) · [Qwen 3.6‑27B project repo](https://github.com/allanchan339/qwen36_27B_own_project) · [vLLM config repo](https://github.com/allanchan339/vLLM-Qwen3.5-27B)
+*Links*:  
+- [Original Qwen 3.5 deep‑dive](https://www.reddit.com/r/Vllm/comments/1skks8n/qwen_35_27b35ba3b_tool_calling_issues_why_it/)  
+- [Parser behaviour across Qwen 3.5/3.6](https://www.reddit.com/r/Vllm/comments/1suasv2/)  
+- [Qwen 3.6‑27B project repo](https://github.com/allanchan339/qwen36_27B_own_project)  
+- [vLLM config repo](https://github.com/allanchan339/vLLM-Qwen3.5-27B)
